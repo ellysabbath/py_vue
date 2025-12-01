@@ -78,7 +78,7 @@ class VerifyEmail(APIView):
             
             # Redirect to your Vue.js frontend
             from django.http import HttpResponseRedirect
-            response = HttpResponseRedirect('http://localhost:3000/profile')
+            response = HttpResponseRedirect('https://udomzone.web.app/profile')
             
             return response
             

@@ -1150,16 +1150,28 @@ class ExpenseCategory(models.Model):
     def __str__(self):
         return self.name
 
+from django.db import models
+from django.utils import timezone
+from django.db.models import Sum
+from datetime import datetime
+import io
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+from reportlab.pdfgen import canvas
+
+
 class FinancialRecord(models.Model):
     date = models.DateField(default=timezone.now)
     
     # Revenue fields
-    source = models.ForeignKey(RevenueSource, on_delete=models.CASCADE, null=True, blank=True)
+    source = models.ForeignKey('RevenueSource', on_delete=models.CASCADE, null=True, blank=True)
     amount_received = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     
     # Expense fields
     expense_reason = models.TextField(blank=True)
-    expense_category = models.ForeignKey(ExpenseCategory, on_delete=models.CASCADE, null=True, blank=True)
+    expense_category = models.ForeignKey('ExpenseCategory', on_delete=models.CASCADE, null=True, blank=True)
     amount_used = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     
     notes = models.TextField(blank=True)
@@ -1168,15 +1180,54 @@ class FinancialRecord(models.Model):
     
     class Meta:
         ordering = ['-date']
+        verbose_name = 'Financial Record'
+        verbose_name_plural = 'Financial Records'
     
     def __str__(self):
         if self.amount_received > 0:
-            return f"Revenue: {self.source} - {self.amount_received}Tsh/= on {self.date}"
+            return f"Revenue: {self.source} - {self.amount_received:,.2f} Tsh/= on {self.date}"
         else:
-            return f"Expense: {self.expense_reason} - {self.amount_used}Tsh/= on {self.date}Tsh/="
+            return f"Expense: {self.expense_reason} - {self.amount_used:,.2f} Tsh/= on {self.date}"
+    
+    def is_revenue(self):
+        """Check if this record is a revenue transaction"""
+        return self.amount_received > 0
+    
+    def is_expense(self):
+        """Check if this record is an expense transaction"""
+        return self.amount_used > 0
+    
+    def get_amount(self):
+        """Get the transaction amount with proper sign"""
+        if self.is_revenue():
+            return self.amount_received
+        else:
+            return -self.amount_used
+    
+    def get_transaction_type(self):
+        """Get the transaction type as string"""
+        return 'Revenue' if self.is_revenue() else 'Expense'
+    
+    def get_description(self):
+        """Get the transaction description"""
+        if self.is_revenue():
+            return str(self.source) if self.source else 'No source specified'
+        else:
+            return self.expense_reason if self.expense_reason else 'No reason specified'
     
     @classmethod
     def get_total_revenue(cls, year=None, month=None, quarter=None):
+        """
+        Get total revenue for a specific period
+        
+        Args:
+            year (int): Filter by year
+            month (int): Filter by month (1-12)
+            quarter (int): Filter by quarter (1-4)
+        
+        Returns:
+            Decimal: Total revenue amount
+        """
         queryset = cls.objects.filter(amount_received__gt=0)
         
         if year:
@@ -1192,6 +1243,17 @@ class FinancialRecord(models.Model):
     
     @classmethod
     def get_total_expenses(cls, year=None, month=None, quarter=None):
+        """
+        Get total expenses for a specific period
+        
+        Args:
+            year (int): Filter by year
+            month (int): Filter by month (1-12)
+            quarter (int): Filter by quarter (1-4)
+        
+        Returns:
+            Decimal: Total expenses amount
+        """
         queryset = cls.objects.filter(amount_used__gt=0)
         
         if year:
@@ -1207,89 +1269,350 @@ class FinancialRecord(models.Model):
     
     @classmethod
     def get_net_income(cls, year=None, month=None, quarter=None):
+        """
+        Calculate net income (revenue - expenses) for a period
+        
+        Returns:
+            Decimal: Net income amount
+        """
         revenue = cls.get_total_revenue(year, month, quarter)
         expenses = cls.get_total_expenses(year, month, quarter)
         return revenue - expenses
     
     @classmethod
+    def get_profit_margin(cls, year=None, month=None, quarter=None):
+        """
+        Calculate profit margin percentage
+        
+        Returns:
+            float: Profit margin percentage, or 0 if no revenue
+        """
+        revenue = cls.get_total_revenue(year, month, quarter)
+        net_income = cls.get_net_income(year, month, quarter)
+        
+        if revenue > 0:
+            return (net_income / revenue) * 100
+        return 0
+    
+    @classmethod
     def get_quarterly_summary(cls, year):
+        """
+        Get financial summary for all quarters of a year
+        
+        Args:
+            year (int): The year to analyze
+        
+        Returns:
+            dict: Quarterly summary with revenue, expenses, and net income
+        """
         quarters = {}
         for quarter in range(1, 5):
             revenue = cls.get_total_revenue(year=year, quarter=quarter)
             expenses = cls.get_total_expenses(year=year, quarter=quarter)
             net_income = revenue - expenses
+            profit_margin = cls.get_profit_margin(year=year, quarter=quarter)
+            
             quarters[f'Q{quarter}'] = {
                 'revenue': revenue,
                 'expenses': expenses,
-                'net_income': net_income
+                'net_income': net_income,
+                'profit_margin': profit_margin
             }
         return quarters
     
     @classmethod
     def get_monthly_summary(cls, year):
+        """
+        Get financial summary for all months of a year
+        
+        Args:
+            year (int): The year to analyze
+        
+        Returns:
+            dict: Monthly summary with revenue, expenses, and net income
+        """
         months = {}
         for month in range(1, 13):
             revenue = cls.get_total_revenue(year=year, month=month)
             expenses = cls.get_total_expenses(year=year, month=month)
             net_income = revenue - expenses
+            profit_margin = cls.get_profit_margin(year=year, month=month)
             month_name = datetime(year, month, 1).strftime('%B')
+            
             months[month_name] = {
                 'revenue': revenue,
                 'expenses': expenses,
-                'net_income': net_income
+                'net_income': net_income,
+                'profit_margin': profit_margin
             }
         return months
     
     @classmethod
+    def get_yearly_summary(cls, start_year, end_year=None):
+        """
+        Get financial summary for multiple years
+        
+        Args:
+            start_year (int): Starting year
+            end_year (int): Ending year (defaults to start_year if None)
+        
+        Returns:
+            dict: Yearly summary
+        """
+        if end_year is None:
+            end_year = start_year
+        
+        years_summary = {}
+        for year in range(start_year, end_year + 1):
+            revenue = cls.get_total_revenue(year=year)
+            expenses = cls.get_total_expenses(year=year)
+            net_income = revenue - expenses
+            profit_margin = cls.get_profit_margin(year=year)
+            
+            years_summary[year] = {
+                'revenue': revenue,
+                'expenses': expenses,
+                'net_income': net_income,
+                'profit_margin': profit_margin
+            }
+        
+        return years_summary
+    
+    @classmethod
     def generate_pdf_report(cls, report_type='monthly', year=None, month=None, quarter=None):
+        """
+        Generate a professional PDF financial report with proper text wrapping
+        
+        Args:
+            report_type (str): 'monthly', 'quarterly', or 'yearly'
+            year (int): Report year
+            month (int): Report month (for monthly reports)
+            quarter (int): Report quarter (for quarterly reports)
+        
+        Returns:
+            BytesIO: PDF file buffer
+        """
         buffer = io.BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=letter)
         elements = []
         styles = getSampleStyleSheet()
         
-        # Title
+        # Create custom styles for better text wrapping
+        styles.add(ParagraphStyle(
+            name='WrapText',
+            fontName='Helvetica',
+            fontSize=8,
+            leading=10,  # Line height
+            wordWrap='LTR',
+            spaceAfter=6,
+        ))
+        
+        styles.add(ParagraphStyle(
+            name='WrapTextBold',
+            fontName='Helvetica-Bold',
+            fontSize=8,
+            leading=10,
+            wordWrap='LTR',
+            spaceAfter=6,
+        ))
+        
+        styles.add(ParagraphStyle(
+            name='WrapTextSmall',
+            fontName='Helvetica',
+            fontSize=7,
+            leading=9,
+            wordWrap='LTR',
+            spaceAfter=4,
+        ))
+
+        # Title Section
         title = Paragraph("Financial Report", styles['Title'])
         elements.append(title)
+        elements.append(Spacer(1, 12))
+        
+        # Determine report period
+        if report_type == 'monthly' and month:
+            period_text = f"{datetime(year, month, 1).strftime('%B %Y')}"
+        elif report_type == 'quarterly' and quarter:
+            period_text = f"Q{quarter} {year}"
+        else:  # Yearly
+            period_text = f"Year {year}"
         
         # Summary Section
-        if report_type == 'monthly' and month:
-            summary_data = [
-                ['Period', f"{datetime(year, month, 1).strftime('%B %Y')}"],
-                ['Total Revenue', f"{cls.get_total_revenue(year=year, month=month):,.2f}Tsh/="],
-                ['Total Expenses', f"{cls.get_total_expenses(year=year, month=month):,.2f}Tsh/="],
-                ['Net Income', f"{cls.get_net_income(year=year, month=month):,.2f}Tsh/="]
-            ]
-        elif report_type == 'quarterly' and quarter:
-            summary_data = [
-                ['Period', f"Q{quarter} {year}"],
-                ['Total Revenue', f"{cls.get_total_revenue(year=year, quarter=quarter):,.2f}Tsh/="],
-                ['Total Expenses', f"{cls.get_total_expenses(year=year, quarter=quarter):,.2f}Tsh/="],
-                ['Net Income', f"{cls.get_net_income(year=year, quarter=quarter):,.2f}Tsh/="]
-            ]
-        else:  # Yearly
-            summary_data = [
-                ['Period', f"Year {year}"],
-                ['Total Revenue', f"{cls.get_total_revenue(year=year):,.2f}Tsh/="],
-                ['Total Expenses', f"{cls.get_total_expenses(year=year):,.2f}Tsh/="],
-                ['Net Income', f"{cls.get_net_income(year=year):,.2f}Tsh/="]
-            ]
+        summary_title = Paragraph(f"Summary - {period_text}", styles['Heading2'])
+        elements.append(summary_title)
+        elements.append(Spacer(1, 8))
         
-        summary_table = Table(summary_data, colWidths=[200, 200])
+        revenue = cls.get_total_revenue(year=year, month=month, quarter=quarter)
+        expenses = cls.get_total_expenses(year=year, month=month, quarter=quarter)
+        net_income = cls.get_net_income(year=year, month=month, quarter=quarter)
+        profit_margin = cls.get_profit_margin(year=year, month=month, quarter=quarter)
+        
+        summary_data = [
+            [Paragraph('<b>Period</b>', styles['WrapText']), Paragraph(period_text, styles['WrapText'])],
+            [Paragraph('<b>Total Revenue</b>', styles['WrapText']), Paragraph(f"{revenue:,.2f} Tsh/=", styles['WrapText'])],
+            [Paragraph('<b>Total Expenses</b>', styles['WrapText']), Paragraph(f"{expenses:,.2f} Tsh/=", styles['WrapText'])],
+            [Paragraph('<b>Net Income</b>', styles['WrapText']), Paragraph(f"{net_income:,.2f} Tsh/=", styles['WrapText'])],
+            [Paragraph('<b>Profit Margin</b>', styles['WrapText']), Paragraph(f"{profit_margin:.1f}%", styles['WrapText'])]
+        ]
+        
+        summary_table = Table(summary_data, colWidths=[120, 180])
         summary_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2E86AB')),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
             ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 14),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-            ('FONTSIZE', (0, 1), (-1, -1), 12),
+            ('FONTSIZE', (0, 0), (-1, 0), 9),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#F8F9FA')),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F8F9FA')]),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#DEE2E6'))
         ]))
         elements.append(summary_table)
+        elements.append(Spacer(1, 20))
         
         # Transactions Section
-        elements.append(Paragraph("<br/><br/>Transactions:", styles['Heading2']))
+        transactions_title = Paragraph("Transaction Details", styles['Heading2'])
+        elements.append(transactions_title)
+        elements.append(Spacer(1, 8))
+        
+        # Get transactions for the period
+        transactions = cls.objects.all()
+        if year:
+            transactions = transactions.filter(date__year=year)
+        if month:
+            transactions = transactions.filter(date__month=month)
+        if quarter:
+            start_month = (quarter - 1) * 3 + 1
+            end_month = start_month + 2
+            transactions = transactions.filter(date__month__range=[start_month, end_month])
+        
+        # Create transaction table with proper text wrapping
+        transaction_data = [[
+            Paragraph('<b>Date</b>', styles['WrapTextBold']),
+            Paragraph('<b>Type</b>', styles['WrapTextBold']),
+            Paragraph('<b>Description</b>', styles['WrapTextBold']),
+            Paragraph('<b>Amount</b>', styles['WrapTextBold']),
+            Paragraph('<b>Notes</b>', styles['WrapTextBold'])
+        ]]
+        
+        for transaction in transactions:
+            # Get transaction details
+            trans_type = transaction.get_transaction_type()
+            description = transaction.get_description()
+            amount = f"{transaction.get_amount():,.2f} Tsh/="
+            notes = transaction.notes if transaction.notes else '-'
+            
+            # Use Paragraph for automatic text wrapping in all columns
+            transaction_data.append([
+                Paragraph(transaction.date.strftime('%Y-%m-%d'), styles['WrapTextSmall']),
+                Paragraph(trans_type, styles['WrapTextSmall']),
+                Paragraph(description, styles['WrapTextSmall']),
+                Paragraph(amount, styles['WrapTextSmall']),
+                Paragraph(notes, styles['WrapTextSmall'])
+            ])
+        
+        if len(transaction_data) > 1:
+            # Create table with optimized column widths
+            trans_table = Table(transaction_data, colWidths=[55, 45, 110, 75, 150])
+            
+            # Apply professional styling
+            trans_table.setStyle(TableStyle([
+                # Header row styling
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2E86AB')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 8),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                
+                # Data rows styling
+                ('BACKGROUND', (0, 1), (-1, -1), colors.white),
+                ('FONTSIZE', (0, 1), (-1, -1), 7),
+                ('ALIGN', (0, 1), (1, -1), 'LEFT'),
+                ('ALIGN', (2, 1), (2, -1), 'LEFT'),
+                ('ALIGN', (3, 1), (3, -1), 'RIGHT'),
+                ('ALIGN', (4, 1), (4, -1), 'LEFT'),
+                
+                # Alternating row colors for better readability
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F8F9FA')]),
+                
+                # Borders and grid
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#DEE2E6')),
+                ('BOX', (0, 0), (-1, -1), 1, colors.HexColor('#2E86AB')),
+                
+                # Padding for better text presentation
+                ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+                ('TOPPADDING', (0, 0), (-1, -1), 3),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ]))
+            
+            elements.append(trans_table)
+        else:
+            no_data_msg = Paragraph("No transactions found for the selected period.", styles['WrapText'])
+            elements.append(no_data_msg)
+        
+        # Footer section
+        elements.append(Spacer(1, 15))
+        generated_at = timezone.now().strftime('%Y-%m-%d at %H:%M:%S')
+        footer_text = f"Report generated on {generated_at}"
+        footer = Paragraph(footer_text, styles['WrapText'])
+        elements.append(footer)
+        
+        try:
+            doc.build(elements)
+            buffer.seek(0)
+            return buffer
+        except Exception as e:
+            # Fallback to simple PDF generation if complex formatting fails
+            return cls.generate_simple_pdf_report(report_type, year, month, quarter)
+    
+    @classmethod
+    def generate_simple_pdf_report(cls, report_type='monthly', year=None, month=None, quarter=None):
+        """
+        Fallback method for simpler PDF generation when complex formatting fails
+        
+        Returns:
+            BytesIO: Simple PDF file buffer
+        """
+        buffer = io.BytesIO()
+        p = canvas.Canvas(buffer, pagesize=letter)
+        
+        # Header
+        p.setFont("Helvetica-Bold", 16)
+        p.drawString(50, 750, "Financial Report")
+        p.setFont("Helvetica", 10)
+        
+        # Period information
+        y_position = 720
+        if report_type == 'monthly' and month:
+            period_text = f"{datetime(year, month, 1).strftime('%B %Y')}"
+        elif report_type == 'quarterly' and quarter:
+            period_text = f"Q{quarter} {year}"
+        else:
+            period_text = f"Year {year}"
+        
+        p.drawString(50, y_position, f"Period: {period_text}")
+        y_position -= 20
+        
+        # Summary information
+        revenue = cls.get_total_revenue(year=year, month=month, quarter=quarter)
+        expenses = cls.get_total_expenses(year=year, month=month, quarter=quarter)
+        net_income = cls.get_net_income(year=year, month=month, quarter=quarter)
+        
+        p.drawString(50, y_position, f"Total Revenue: {revenue:,.2f} Tsh/=")
+        y_position -= 15
+        p.drawString(50, y_position, f"Total Expenses: {expenses:,.2f} Tsh/=")
+        y_position -= 15
+        p.drawString(50, y_position, f"Net Income: {net_income:,.2f} Tsh/=")
+        y_position -= 30
+        
+        # Transactions list
+        p.drawString(50, y_position, "Transactions:")
+        y_position -= 20
         
         transactions = cls.objects.all()
         if year:
@@ -1301,46 +1624,38 @@ class FinancialRecord(models.Model):
             end_month = start_month + 2
             transactions = transactions.filter(date__month__range=[start_month, end_month])
         
-        transaction_data = [['Date', 'Type', 'Description', 'Amount']]
         for transaction in transactions:
-            if transaction.amount_received > 0:
-                trans_type = 'Revenue'
-                description = str(transaction.source)
-                amount = f"{transaction.amount_received:,.2f}Tsh/="
-            else:
-                trans_type = 'Expense'
-                description = transaction.expense_reason
-                amount = f"{transaction.amount_used:,.2f}Tsh/="
+            # Check if we need a new page
+            if y_position < 50:
+                p.showPage()
+                p.setFont("Helvetica", 10)
+                y_position = 750
             
-            transaction_data.append([
-                transaction.date.strftime('%Y-%m-%d'),
-                trans_type,
-                description,
-                amount
-            ])
+            # Create transaction line
+            if transaction.is_revenue():
+                line = f"{transaction.date}: Revenue - {transaction.get_description()} - {transaction.amount_received:,.2f} Tsh/="
+            else:
+                line = f"{transaction.date}: Expense - {transaction.get_description()} - {transaction.amount_used:,.2f} Tsh/="
+            
+            # Add notes if available
+            if transaction.notes:
+                line += f" | Notes: {transaction.notes}"
+            
+            # Truncate very long lines to prevent overflow
+            if len(line) > 100:
+                line = line[:97] + "..."
+            
+            p.drawString(50, y_position, line)
+            y_position -= 12
         
-        if len(transaction_data) > 1:
-            trans_table = Table(transaction_data, colWidths=[80, 80, 200, 100])
-            trans_table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, 0), 10),
-                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-                ('BACKGROUND', (0, 1), (-1, -1), colors.white),
-                ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-                ('FONTSIZE', (0, 1), (-1, -1), 8),
-                ('GRID', (0, 0), (-1, -1), 1, colors.black)
-            ]))
-            elements.append(trans_table)
+        # Generation timestamp
+        y_position -= 20
+        generated_at = timezone.now().strftime('%Y-%m-%d %H:%M')
+        p.drawString(50, y_position, f"Generated: {generated_at}")
         
-        doc.build(elements)
+        p.save()
         buffer.seek(0)
         return buffer
-
-
-
 
 # ===========================//  LIBRARY  //==================
 from django.db import models
